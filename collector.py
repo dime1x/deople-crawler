@@ -1,78 +1,128 @@
-import certstream
-import sqlite3
+
+import os
 import time
-import re
+import requests
 
-DB = "deople.db"
+# =====================================
+# Cloudflare D1 配置
+# =====================================
 
-conn = sqlite3.connect(DB)
-conn.execute("""
-CREATE TABLE IF NOT EXISTS raw_domains (
-    domain TEXT PRIMARY KEY,
-    first_seen INTEGER
+CF_ACCOUNT_ID = os.environ["CF_ACCOUNT_ID"]
+D1_DATABASE_ID = os.environ["D1_DATABASE_ID"]
+CF_API_TOKEN = os.environ["CF_API_TOKEN"]
+
+D1_URL = (
+    f"https://api.cloudflare.com/client/v4/accounts/"
+    f"{CF_ACCOUNT_ID}/d1/database/{D1_DATABASE_ID}/query"
 )
-""")
-conn.commit()
+
+HEADERS = {
+    "Authorization": f"Bearer {CF_API_TOKEN}",
+    "Content-Type": "application/json"
+}
+
+# 每批最多插入 50 个网站
+DB_BATCH_SIZE = 50
 
 
-def valid_domain(domain):
-    domain = domain.lower().strip()
+# =====================================
+# 批量写入 D1
+# =====================================
 
-    if domain.startswith("*."):
-        domain = domain[2:]
+def insert_websites(websites):
+    """
+    websites 格式：
+    [
+        {
+            "domain": "example.com",
+            "url": "https://example.com",
+            "final_url": "https://example.com/",
+            "http_status": 200
+        }
+    ]
+    """
 
-    if len(domain) > 253:
-        return None
+    if not websites:
+        return 0
 
-    if "." not in domain:
-        return None
+    total_inserted = 0
 
-    if not re.fullmatch(
-        r"[a-z0-9.-]+",
-        domain
-    ):
-        return None
+    for start in range(0, len(websites), DB_BATCH_SIZE):
+        batch = websites[start:start + DB_BATCH_SIZE]
 
-    if ".." in domain or domain.startswith("."):
-        return None
+        now = int(time.time())
 
-    return domain
+        values = []
+        params = []
 
+        for site in batch:
+            values.append("(?, ?, ?, ?, 'pending', 'pending', ?, ?)")
 
-def callback(message, context):
-    try:
-        domains = message.get(
-            "data", {}
-        ).get(
-            "leaf_cert", {}
-        ).get(
-            "all_domains", []
+            params.extend([
+                site["domain"],
+                site["url"],
+                site["final_url"],
+                site["http_status"],
+                now,
+                now
+            ])
+
+        sql = """
+        INSERT OR IGNORE INTO websites (
+            domain,
+            url,
+            final_url,
+            http_status,
+            crawl_status,
+            image_status,
+            first_seen,
+            updated_at
+        )
+        VALUES
+        """ + ", ".join(values)
+
+        payload = {
+            "sql": sql,
+            "params": params
+        }
+
+        response = None
+
+        for attempt in range(3):
+            try:
+                response = requests.post(
+                    D1_URL,
+                    headers=HEADERS,
+                    json=payload,
+                    timeout=30
+                )
+
+                response.raise_for_status()
+
+                result = response.json()
+
+                if not result.get("success"):
+                    raise RuntimeError(str(result.get("errors")))
+
+                break
+
+            except Exception:
+                if attempt == 2:
+                    raise
+
+                time.sleep(2 ** attempt)
+
+        # D1 的 meta.changes 是实际插入的行数
+        try:
+            result = response.json()
+            changes = result["result"][0]["meta"]["changes"]
+            total_inserted += changes
+        except (KeyError, IndexError, TypeError):
+            pass
+
+        print(
+            f"D1 批量写入完成："
+            f"{len(batch)} 条提交，累计新增 {total_inserted} 条"
         )
 
-        for item in domains:
-            domain = valid_domain(item)
-
-            if not domain:
-                continue
-
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO raw_domains
-                (domain, first_seen)
-                VALUES (?, ?)
-                """,
-                (domain, int(time.time()))
-            )
-
-        conn.commit()
-
-    except Exception as e:
-        print("处理错误:", e)
-
-
-print("Deople Collector started")
-
-certstream.listen_for_events(
-    callback,
-    url="wss://certstream.calidog.io/"
-)
+    return total_inserted
