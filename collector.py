@@ -17,7 +17,7 @@ from database import insert_websites
 # 1. 基础配置
 # ==================================================
 
-CERTSTREAM_URL = "wss://certstream.calidog.io/"
+CERTSTREAM_URL = "wss://api.certstream.dev/domains-only"
 
 # 同时检测的网站数量
 WORKERS = 30
