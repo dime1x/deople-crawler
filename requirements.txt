@@ -1,3 +1,4 @@
 certstream
 httpx
 requests
+boto3
