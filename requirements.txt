@@ -3,3 +3,4 @@ httpx
 requests
 boto3
 Pillow
+playwright
