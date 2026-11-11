@@ -32,6 +32,7 @@ jobs:
           ls -la
           test -f database.py
           test -f collector.py
+          test -f crawler.py
 
       - name: Test D1 connection
         run: python -u database.py
@@ -47,3 +48,10 @@ jobs:
           D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CERTSTREAM_API_KEY: ${{ secrets.CERTSTREAM_API_KEY }}
+
+      - name: Run crawler
+        run: python -u crawler.py
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
