@@ -5,7 +5,8 @@ import socket
 import threading
 import time
 import logging
-from urllib.parse import urlparse, urljoin
+import os
+from urllib.parse import urlparse, urljoin, urlencode
 
 import certstream
 import httpx
@@ -17,7 +18,20 @@ from database import insert_websites
 # 1. 基础配置
 # ==================================================
 
-CERTSTREAM_URL = "wss://api.certstream.dev/domains-only"
+# Hosted CertStream：domains-only 是默认数据流，使用根路径 + key 参数。
+# Token 放在 GitHub Actions Secrets，不要写死在代码里。
+CERTSTREAM_API_KEY = os.environ.get("CERTSTREAM_API_KEY", "").strip()
+
+if not CERTSTREAM_API_KEY:
+    raise RuntimeError(
+        "缺少环境变量 CERTSTREAM_API_KEY。"
+        "请在 GitHub Settings → Secrets and variables → Actions 中配置。"
+    )
+
+CERTSTREAM_URL = (
+    "wss://api.certstream.dev/?"
+    + urlencode({"key": CERTSTREAM_API_KEY})
+)
 
 # 同时检测的网站数量
 WORKERS = 30
@@ -266,14 +280,21 @@ def start_certstream(loop, queue):
 
         try:
 
-            if message.get("message_type") != "certificate_update":
-                return
-
+            message_type = message.get("message_type")
             data = message.get("data", {})
 
-            cert = data.get("leaf_cert", {})
+            # Hosted CertStream 的 domains-only 流格式：
+            # {"message_type": "dns_entries", "data": ["example.com", ...]}
+            if message_type == "dns_entries":
+                domains = data if isinstance(data, list) else []
 
-            domains = cert.get("all_domains", [])
+            # 兼容 lite / 原始 CertStream 格式
+            elif message_type == "certificate_update":
+                cert = data.get("leaf_cert", {})
+                domains = cert.get("all_domains", [])
+
+            else:
+                return
 
             for raw_domain in domains:
 
@@ -282,19 +303,18 @@ def start_certstream(loop, queue):
                 if not domain:
                     continue
 
-                # 在事件循环线程中安全加入队列
-                def enqueue(d=domain):
-
+                # 从 CertStream 线程安全地把域名放入 asyncio 队列
+                def enqueue(d):
                     try:
                         queue.put_nowait(d)
-
                     except asyncio.QueueFull:
                         logger.warning(
                             "检测队列已满，丢弃域名：%s",
                             d
                         )
 
-                loop.call_soon_threadsafe(enqueue)
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(enqueue, domain)
 
         except Exception as e:
 
@@ -304,7 +324,7 @@ def start_certstream(loop, queue):
 
         try:
 
-            logger.info("正在连接 CertStream...")
+            logger.info("正在连接 CertStream domains-only 数据流...")
 
             certstream.listen_for_events(
                 callback,
