@@ -1,4 +1,4 @@
-
+```yaml
 name: Deople Collector
 
 on:
@@ -20,30 +20,44 @@ jobs:
     timeout-minutes: 350
 
     steps:
-  - uses: actions/checkout@v4
+      # 1. 获取 GitHub 仓库代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  - uses: actions/setup-python@v5
-    with:
-      python-version: "3.12"
+      # 2. 配置 Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-  - name: Install dependencies
-    run: |
-      python -m pip install --upgrade pip
-      pip install -r requirements.txt
-
-  - name: Test D1 database connection
-    run: python -u database.py
-    env:
-      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
-      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-
-  - name: Run collector
-    run: python -u collector.py
-    env:
-      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
-      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-      CERTSTREAM_API_KEY: ${{ secrets.CERTSTREAM_API_KEY }}
+      # 3. 安装依赖
+      - name: Install dependencies
         run: |
-          python -u collector.py
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 4. 检查文件是否存在
+      - name: Check project files
+        run: |
+          echo "Checking project files..."
+          ls -la
+          test -f database.py
+          test -f collector.py
+          echo "Project files OK"
+
+      # 5. 测试 Cloudflare D1 数据库连接
+      - name: Test D1 database connection
+        run: python -u database.py
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+
+      # 6. 运行网站采集程序
+      - name: Run collector
+        run: python -u collector.py
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CERTSTREAM_API_KEY: ${{ secrets.CERTSTREAM_API_KEY }}
