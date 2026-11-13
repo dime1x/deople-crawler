@@ -13,7 +13,7 @@ jobs:
   collector:
     name: Collect websites
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
