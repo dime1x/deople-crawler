@@ -1,0 +1,92 @@
+
+name: Deople Publisher
+
+on:
+  # 每天 UTC 04:00 运行
+  # 北京时间每天 12:00
+  schedule:
+    - cron: "0 4 * * *"
+
+  # 支持手动运行
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 防止多个发布任务同时运行
+concurrency:
+  group: deople-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish Websites
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+    env:
+      # Cloudflare D1
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+
+      # 图片域名
+      IMAGE_BASE_URL: https://img.deople.ai
+
+      # Publisher 配置
+      PUBLISH_BATCH_SIZE: "500"
+      PUBLISH_OUTPUT: data/websites.json
+
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      # 1. 获取仓库代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      # 2. 安装 Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # 3. 安装依赖
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 4. 检查 Python 代码
+      - name: Check publisher.py
+        run: |
+          python -m py_compile publisher.py
+
+      # 5. 运行发布程序
+      - name: Run publisher
+        run: |
+          python -u publisher.py
+
+      # 6. 检查生成的 JSON
+      - name: Verify websites.json
+        run: |
+          python -m json.tool data/websites.json > /dev/null
+          echo "JSON validation passed"
+
+      # 7. 提交 JSON 到 GitHub
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/websites.json
+
+          if git diff --cached --quiet; then
+            echo "No changes to publish"
+          else
+            git commit -m "Update Deople websites data"
+            git push origin HEAD:main
+          fi
