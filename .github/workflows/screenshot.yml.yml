@@ -1,0 +1,81 @@
+
+name: Deople Screenshot
+
+on:
+  # 每天 UTC 03:00 运行
+  # 北京时间每天 11:00
+  schedule:
+    - cron: "0 3 * * *"
+
+  # 支持手动运行
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 防止多个截图任务同时运行
+concurrency:
+  group: deople-screenshot
+  cancel-in-progress: false
+
+jobs:
+  screenshot:
+    name: Capture Website Screenshots
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 120
+
+    env:
+      # Cloudflare D1
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+
+      # Cloudflare R2
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+      R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+
+      # R2 配置
+      R2_BUCKET: deople-images
+      IMAGE_BASE_URL: https://img.deople.ai
+
+      # 截图配置
+      SCREENSHOT_BATCH_SIZE: "20"
+      SCREENSHOT_MAX_BATCHES: "5"
+
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      # 1. 获取 GitHub 仓库代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. 安装 Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # 3. 安装 Python 依赖
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 4. 安装 Playwright Chromium
+      - name: Install Playwright Chromium
+        run: |
+          python -m playwright install --with-deps chromium
+
+      # 5. 检查 Python 文件
+      - name: Check screenshot.py
+        run: |
+          python -m py_compile screenshot.py
+          echo "screenshot.py syntax check passed"
+
+      # 6. 运行截图任务
+      - name: Run screenshot
+        run: |
+          python -u screenshot.py
