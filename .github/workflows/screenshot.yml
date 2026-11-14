@@ -41,8 +41,8 @@ jobs:
       IMAGE_BASE_URL: https://img.deople.ai
 
       # 截图配置
-      SCREENSHOT_BATCH_SIZE: "20"
-      SCREENSHOT_MAX_BATCHES: "5"
+      SCREENSHOT_BATCH_SIZE: "200"
+      SCREENSHOT_MAX_BATCHES: "50"
 
       PYTHONUNBUFFERED: "1"
 
