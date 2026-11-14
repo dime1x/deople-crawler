@@ -44,7 +44,7 @@ BATCH_SIZE = int(
 
 # 每次最多运行批次数量
 MAX_BATCHES = int(
-    os.getenv("SCREENSHOT_MAX_BATCHES", "20")
+    os.getenv("SCREENSHOT_MAX_BATCHES", "50")
 )
 
 # 最终只保存一张电脑端截图，固定尺寸 240 × 320
