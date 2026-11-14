@@ -39,12 +39,12 @@ IMAGE_BASE_URL = os.getenv(
 
 # 每批截图网站数量
 BATCH_SIZE = int(
-    os.getenv("SCREENSHOT_BATCH_SIZE", "20")
+    os.getenv("SCREENSHOT_BATCH_SIZE", "100")
 )
 
 # 每次最多运行批次数量
 MAX_BATCHES = int(
-    os.getenv("SCREENSHOT_MAX_BATCHES", "5")
+    os.getenv("SCREENSHOT_MAX_BATCHES", "20")
 )
 
 # 最终只保存一张电脑端截图，固定尺寸 240 × 320

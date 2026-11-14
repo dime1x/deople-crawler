@@ -2,82 +2,73 @@
 name: Deople Publisher
 
 on:
-  # 每天 UTC 04:00 运行
-  # 北京时间每天 12:00
+  workflow_dispatch:
   schedule:
     - cron: "0 4 * * *"
 
-  # 支持手动运行
-  workflow_dispatch:
-
 permissions:
-  contents: write
+  contents: read
 
-# 防止多个发布任务同时运行
 concurrency:
   group: deople-publisher
   cancel-in-progress: false
 
 jobs:
   publish:
-    name: Publish Websites
     runs-on: ubuntu-latest
-
-    timeout-minutes: 30
-
-    env:
-      # Cloudflare D1
-      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
-      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-
-      # 图片域名
-      IMAGE_BASE_URL: https://img.deople.ai
-
-      # Publisher 配置
-      PUBLISH_BATCH_SIZE: "500"
-      PUBLISH_OUTPUT: data/websites.json
-
-      PYTHONUNBUFFERED: "1"
+    timeout-minutes: 20
 
     steps:
-      # 1. 获取仓库代码
-      - name: Checkout repository
+      # 检出 crawler 仓库
+      - name: Checkout crawler repository
         uses: actions/checkout@v4
         with:
-          ref: main
+          path: crawler
 
-      # 2. 安装 Python
+      # 检出网站数据目标仓库
+      - name: Checkout website repository
+        uses: actions/checkout@v4
+        with:
+          repository: dime1x/dime1x.github.io
+          ref: main
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: website
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
+          cache: pip
+          cache-dependency-path: crawler/requirements.txt
 
-      # 3. 安装依赖
       - name: Install dependencies
+        working-directory: crawler
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
 
-      # 4. 检查 Python 代码
-      - name: Check publisher.py
-        run: |
-          python -m py_compile publisher.py
+      # publisher.py 生成 JSON 到网站仓库
+      - name: Generate websites.json
+        working-directory: crawler
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          IMAGE_BASE_URL: https://img.deople.ai
+          PUBLISH_BATCH_SIZE: "500"
+          PUBLISH_OUTPUT: ../website/data/websites.json
+        run: python -u publisher.py
 
-      # 5. 运行发布程序
-      - name: Run publisher
-        run: |
-          python -u publisher.py
+      # 检查 JSON
+      - name: Validate JSON
+        working-directory: website
+        run: python -m json.tool data/websites.json > /dev/null
 
-      # 6. 检查生成的 JSON
-      - name: Verify websites.json
-        run: |
-          python -m json.tool data/websites.json > /dev/null
-          echo "JSON validation passed"
-
-      # 7. 提交 JSON 到 GitHub
-      - name: Commit and push
+      # 提交到 dime1x/dime1x.github.io
+      - name: Commit and push JSON
+        working-directory: website
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -85,8 +76,9 @@ jobs:
           git add data/websites.json
 
           if git diff --cached --quiet; then
-            echo "No changes to publish"
-          else
-            git commit -m "Update Deople websites data"
-            git push origin HEAD:main
+            echo "websites.json 没有变化，无需提交"
+            exit 0
           fi
+
+          git commit -m "Update website directory data"
+          git push origin main
