@@ -18,8 +18,6 @@ from database import insert_websites
 # 1. 基础配置
 # ==================================================
 
-# Hosted CertStream：domains-only 是默认数据流，使用根路径 + key 参数。
-# Token 放在 GitHub Actions Secrets，不要写死在代码里。
 CERTSTREAM_API_KEY = os.environ.get("CERTSTREAM_API_KEY", "").strip()
 
 if not CERTSTREAM_API_KEY:
@@ -95,13 +93,28 @@ def normalize_domain(raw_domain):
     if len(domain) > 253:
         return None
 
-    # 最多允许两个点号
-    if domain.count(".") > MAX_DOTS:
-        return None
+    # 统计点号数量
+    dot_count = domain.count(".")
 
     # 必须包含点号
-    if "." not in domain:
+    if dot_count == 0:
         return None
+
+    # 最多允许两个点号
+    if dot_count > MAX_DOTS:
+        return None
+
+    # 两个点号的域名，只允许以下例外
+    if dot_count == 2:
+
+        allowed = (
+            domain.startswith("www.")
+            or domain.endswith(".pages.dev")
+            or domain.endswith(".co.uk")
+        )
+
+        if not allowed:
+            return None
 
     # 排除 IP 地址
     try:
@@ -283,13 +296,14 @@ def start_certstream(loop, queue):
             message_type = message.get("message_type")
             data = message.get("data", {})
 
-            # Hosted CertStream 的 domains-only 流格式：
-            # {"message_type": "dns_entries", "data": ["example.com", ...]}
+            # Hosted CertStream 的 domains-only 流格式
             if message_type == "dns_entries":
+
                 domains = data if isinstance(data, list) else []
 
             # 兼容 lite / 原始 CertStream 格式
             elif message_type == "certificate_update":
+
                 cert = data.get("leaf_cert", {})
                 domains = cert.get("all_domains", [])
 
@@ -300,20 +314,26 @@ def start_certstream(loop, queue):
 
                 domain = normalize_domain(raw_domain)
 
+                # 不符合规则的域名直接过滤
                 if not domain:
                     continue
 
                 # 从 CertStream 线程安全地把域名放入 asyncio 队列
                 def enqueue(d):
+
                     try:
+
                         queue.put_nowait(d)
+
                     except asyncio.QueueFull:
+
                         logger.warning(
                             "检测队列已满，丢弃域名：%s",
                             d
                         )
 
                 if not loop.is_closed():
+
                     loop.call_soon_threadsafe(enqueue, domain)
 
         except Exception as e:
@@ -470,7 +490,7 @@ async def main():
     # 合格网站队列
     result_queue = asyncio.Queue()
 
-    # 去重集合
+    # 内存去重集合
     seen = set()
 
     seen_lock = asyncio.Lock()
