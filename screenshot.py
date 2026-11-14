@@ -47,8 +47,9 @@ MAX_BATCHES = int(
     os.getenv("SCREENSHOT_MAX_BATCHES", "5")
 )
 
-# 图片宽度：手机120px，桌面240px
-IMAGE_WIDTHS = [120, 240]
+# 最终只保存一张电脑端截图，固定尺寸 240 × 320
+IMAGE_WIDTH = 240
+IMAGE_HEIGHT = 320
 
 # JPEG压缩质量
 IMAGE_QUALITY = 75
@@ -329,10 +330,10 @@ def capture_screenshot(browser, url):
 
 # ============================================================
 # 8. 图片压缩
-#    分别生成120px和240px
+#    固定生成240 × 320px图片，从网页顶部开始裁切
 # ============================================================
 
-def compress_image(image_bytes, target_width):
+def compress_image(image_bytes):
 
     image = Image.open(
         io.BytesIO(image_bytes)
@@ -340,31 +341,23 @@ def compress_image(image_bytes, target_width):
 
     width, height = image.size
 
-    # 限制最大高度
-    if height > MAX_SCREENSHOT_HEIGHT:
+    # 目标比例为 3:4。按原图宽度计算需要的裁切高度，
+    # 从网页顶部开始保留内容，不再生成手机版图片。
+    target_ratio = IMAGE_WIDTH / IMAGE_HEIGHT
+    crop_height = int(width / target_ratio)
 
-        image = image.crop(
-            (
-                0,
-                0,
-                width,
-                MAX_SCREENSHOT_HEIGHT
-            )
-        )
+    if height >= crop_height:
+        image = image.crop((0, 0, width, crop_height))
+    else:
+        # 页面内容不足时，在底部补白，避免拉伸变形
+        canvas = Image.new("RGB", (width, crop_height), "white")
+        canvas.paste(image, (0, 0))
+        image = canvas
 
-    width, height = image.size
-
-    # 按目标宽度等比例缩放
-    if width > target_width:
-
-        new_height = int(
-            height * target_width / width
-        )
-
-        image = image.resize(
-            (target_width, new_height),
-            Image.Resampling.LANCZOS
-        )
+    image = image.resize(
+        (IMAGE_WIDTH, IMAGE_HEIGHT),
+        Image.Resampling.LANCZOS
+    )
 
     output = io.BytesIO()
 
@@ -382,7 +375,7 @@ def compress_image(image_bytes, target_width):
 # 9. 生成图片文件名
 # ============================================================
 
-def make_image_key(domain, width):
+def make_image_key(domain):
 
     domain = str(domain).lower().strip()
 
@@ -395,19 +388,16 @@ def make_image_key(domain, width):
     if not safe_domain:
         raise ValueError("无效的网站域名")
 
-    return f"{safe_domain}_{width}.jpg"
+    return f"{safe_domain}.jpg"
 
 
 # ============================================================
 # 10. 上传图片到R2
 # ============================================================
 
-def upload_to_r2(s3, domain, image_bytes, width):
+def upload_to_r2(s3, domain, image_bytes):
 
-    image_key = make_image_key(
-        domain,
-        width
-    )
+    image_key = make_image_key(domain)
 
     s3.put_object(
         Bucket=R2_BUCKET,
@@ -455,45 +445,34 @@ def process_website(
         if not url:
             raise ValueError("网站URL为空")
 
-        # 第一步：网页只截图一次
+        # 第一步：网页截图一次
         image_bytes = capture_screenshot(
             browser,
             url
         )
 
-        image_urls = {}
+        # 第二步：裁切并压缩为固定240 × 320px
+        compressed = compress_image(image_bytes)
 
-        # 第二步：生成120px和240px两张图片
-        for width in IMAGE_WIDTHS:
+        # 第三步：只上传一张图片到R2
+        image_url, image_key = upload_to_r2(
+            s3,
+            domain,
+            compressed
+        )
 
-            compressed = compress_image(
-                image_bytes,
-                width
-            )
+        logger.info(
+            "[IMAGE] %s | 240x320px | %.1f KB | %s",
+            domain,
+            len(compressed) / 1024,
+            image_url
+        )
 
-            # 第三步：分别上传R2
-            image_url, image_key = upload_to_r2(
-                s3,
-                domain,
-                compressed,
-                width
-            )
-
-            image_urls[str(width)] = image_url
-
-            logger.info(
-                "[IMAGE] %s | %spx | %.1f KB | %s",
-                domain,
-                width,
-                len(compressed) / 1024,
-                image_url
-            )
-
-        # 第四步：D1保存240px图片地址
+        # 第四步：D1保存唯一图片地址
         update_image(
             domain,
-            image_urls["240"],
-            f"{domain}_240.jpg"
+            image_url,
+            image_key
         )
 
         totals["success"] += 1
@@ -538,9 +517,8 @@ def main():
 
     logger.info("====================================")
     logger.info("Deople Screenshot启动")
-    logger.info("图片宽度：%s", IMAGE_WIDTHS)
-    logger.info("手机端：120px")
-    logger.info("桌面端：240px")
+    logger.info("最终图片尺寸：%s × %s px", IMAGE_WIDTH, IMAGE_HEIGHT)
+    logger.info("截图模式：仅电脑端，不生成手机版")
     logger.info("每批数量：%s", BATCH_SIZE)
     logger.info("最多处理批次：%s", MAX_BATCHES)
     logger.info("R2 Bucket：%s", R2_BUCKET)
