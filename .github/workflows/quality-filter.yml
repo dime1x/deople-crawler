@@ -20,7 +20,7 @@ jobs:
   quality-filter:
     name: Filter All Pending Websites
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 20
 
     steps:
       # 1. 获取 GitHub 仓库代码
