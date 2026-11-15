@@ -10,7 +10,11 @@ from database import _query, _rows
 # 配置
 # ============================================================
 
-BATCH_SIZE = int(os.getenv("QUALITY_BATCH_SIZE", "100"))
+BATCH_SIZE = max(1, int(os.getenv("QUALITY_BATCH_SIZE", "100")))
+# 每条批量 UPDATE 最多处理 15 个网站，避免 SQL 绑定参数过多。
+BULK_UPDATE_SIZE = max(1, min(int(os.getenv("QUALITY_BULK_UPDATE_SIZE", "15")), 15))
+# 每次运行最多筛选 2000 个网站；设置为 0 表示不限制。
+MAX_PER_RUN = max(0, int(os.getenv("QUALITY_MAX_PER_RUN", "2000")))
 
 # 最低合格分数
 QUALIFIED_SCORE = 65
@@ -30,9 +34,11 @@ logger = logging.getLogger("DeopleQualityFilter")
 # 1. 获取待筛选网站
 # ============================================================
 
-def get_pending_quality_websites(limit=100):
+def get_pending_quality_websites(limit=100, after_domain=""):
     """
-    获取已经爬取完成、但尚未进行质量筛选的网站。
+    获取尚未筛选且爬取流程已结束的网站。
+    使用 domain 游标分页：失败记录在本次运行中不会被反复取出；
+    下一次运行游标重置后，仍会重新尝试所有 quality_status IS NULL 的记录。
     """
 
     sql = """
@@ -48,14 +54,13 @@ def get_pending_quality_websites(limit=100):
         WHERE quality_status IS NULL
           AND crawl_status IS NOT NULL
           AND crawl_status != 'pending'
-        ORDER BY last_checked ASC
+          AND domain > ?
+        ORDER BY domain ASC
         LIMIT ?
     """
 
-    result = _query(sql, [limit])
-
+    result = _query(sql, [after_domain, limit])
     return _rows(result)
-
 
 # ============================================================
 # 2. 文本清理
@@ -263,33 +268,66 @@ def evaluate_website(item):
 # 5. 保存筛选结果
 # ============================================================
 
-def save_quality_result(domain, result):
+def save_quality_results(items):
     """
-    将质量评分保存到 D1。
-    只更新尚未筛选的网站。
+    批量保存一组评分结果。
+    只更新 quality_status 仍为 NULL 的网站，避免覆盖已筛选结果。
+    使用 CTE + VALUES，一条 SQL 更新多个网站行。
     """
 
-    sql = """
+    if not items:
+        return
+
+    now = int(time.time())
+    values_sql = ", ".join(["(?, ?, ?, ?, ?)"] * len(items))
+
+    sql = f"""
+        WITH updates (
+            domain,
+            quality_status,
+            quality_score,
+            quality_reason,
+            quality_checked_at
+        ) AS (
+            VALUES {values_sql}
+        )
         UPDATE websites
         SET
-            quality_status = ?,
-            quality_score = ?,
-            quality_reason = ?,
-            quality_checked_at = ?
-        WHERE domain = ?
-          AND quality_status IS NULL
+            quality_status = (
+                SELECT quality_status
+                FROM updates
+                WHERE updates.domain = websites.domain
+            ),
+            quality_score = (
+                SELECT quality_score
+                FROM updates
+                WHERE updates.domain = websites.domain
+            ),
+            quality_reason = (
+                SELECT quality_reason
+                FROM updates
+                WHERE updates.domain = websites.domain
+            ),
+            quality_checked_at = (
+                SELECT quality_checked_at
+                FROM updates
+                WHERE updates.domain = websites.domain
+            )
+        WHERE quality_status IS NULL
+          AND domain IN (SELECT domain FROM updates)
     """
 
-    params = [
-        result["quality_status"],
-        result["quality_score"],
-        result["quality_reason"],
-        int(time.time()),
-        domain
-    ]
+    params = []
+    for item in items:
+        params.extend([
+            item["domain"],
+            item["result"]["quality_status"],
+            item["result"]["quality_score"],
+            item["result"]["quality_reason"],
+            now,
+        ])
 
     return _query(sql, params)
-
 
 # ============================================================
 # 6. 批量处理
@@ -297,37 +335,70 @@ def save_quality_result(domain, result):
 
 def process_batch(websites, totals):
     """
-    处理一批网站。
+    先在本地计算评分，再分小批次写入 D1。
+    单个网站评分异常不会阻止同批其他网站继续处理。
     """
+
+    prepared = []
+    batch_failed = 0
+
+    for website in websites:
+        domain = str(website.get("domain") or "").strip()
+        if not domain:
+            batch_failed += 1
+            totals["failed"] += 1
+            logger.error("[ERROR] 网站缺少 domain，跳过该记录")
+            continue
+
+        try:
+            result = evaluate_website(website)
+            prepared.append({
+                "domain": domain,
+                "result": result,
+            })
+        except Exception as e:
+            batch_failed += 1
+            totals["failed"] += 1
+            logger.exception("[ERROR] 网站评分失败：%s | %s", domain, e)
 
     batch_checked = 0
     batch_qualified = 0
     batch_review = 0
     batch_rejected = 0
-    batch_failed = 0
+    write_failed = False
 
-    for website in websites:
-
-        domain = website.get("domain", "")
+    for start in range(0, len(prepared), BULK_UPDATE_SIZE):
+        chunk = prepared[start:start + BULK_UPDATE_SIZE]
 
         try:
-            result = evaluate_website(website)
+            save_quality_results(chunk)
+        except Exception as e:
+            write_failed = True
+            failed_count = len(chunk)
+            batch_failed += failed_count
+            totals["failed"] += failed_count
+            logger.exception(
+                "[ERROR] 批量保存 D1 失败，本批 %s 个网站未确认保存：%s",
+                failed_count,
+                e
+            )
+            # D1 写入异常时停止后续写入，避免持续请求一个故障接口。
+            break
 
-            save_quality_result(domain, result)
+        for item in chunk:
+            domain = item["domain"]
+            result = item["result"]
+            status = result["quality_status"]
 
             batch_checked += 1
             totals["checked"] += 1
 
-            status = result["quality_status"]
-
             if status == "qualified":
                 batch_qualified += 1
                 totals["qualified"] += 1
-
             elif status == "review":
                 batch_review += 1
                 totals["review"] += 1
-
             else:
                 batch_rejected += 1
                 totals["rejected"] += 1
@@ -340,25 +411,14 @@ def process_batch(websites, totals):
                 result["quality_reason"]
             )
 
-        except Exception as e:
-
-            batch_failed += 1
-            totals["failed"] += 1
-
-            logger.exception(
-                "[ERROR] 网站处理失败：%s | %s",
-                domain,
-                e
-            )
-
     return {
         "checked": batch_checked,
         "qualified": batch_qualified,
         "review": batch_review,
         "rejected": batch_rejected,
-        "failed": batch_failed
+        "failed": batch_failed,
+        "write_failed": write_failed,
     }
-
 
 # ============================================================
 # 7. 主程序：循环检查全部待筛选网站
@@ -376,35 +436,50 @@ def main():
 
     logger.info("====================================")
     logger.info("Deople 网站质量筛选启动")
-    logger.info("每批处理数量：%s", BATCH_SIZE)
-    logger.info("目标：全部待筛选网站")
+    logger.info("每次读取数量：%s", BATCH_SIZE)
+    logger.info("每条批量 UPDATE 数量：%s", BULK_UPDATE_SIZE)
+    logger.info("本次运行最大处理数量：%s（0 表示不限制）", MAX_PER_RUN)
+    logger.info("筛选条件：仅 quality_status IS NULL，且爬取流程已结束")
     logger.info("====================================")
 
     batch_number = 0
+    after_domain = ""
+    reached_limit = False
 
     while True:
 
-        try:
-            websites = get_pending_quality_websites(BATCH_SIZE)
+        if MAX_PER_RUN and totals["checked"] >= MAX_PER_RUN:
+            reached_limit = True
+            logger.info("达到本次运行数量上限：%s", MAX_PER_RUN)
+            break
 
+        remaining = BATCH_SIZE
+        if MAX_PER_RUN:
+            remaining = min(BATCH_SIZE, MAX_PER_RUN - totals["checked"])
+
+        try:
+            websites = get_pending_quality_websites(remaining, after_domain)
         except Exception as e:
             logger.exception("读取 D1 待筛选网站失败：%s", e)
             break
 
-        # 没有待筛选网站，结束
         if not websites:
             logger.info("没有更多待筛选网站")
             break
 
         batch_number += 1
+        # 无论评分是否成功，都推进游标，避免失败记录在本次运行中无限重试。
+        last_domain = str(websites[-1].get("domain") or "").strip()
 
         logger.info(
-            "开始第 %s 批，本批网站数量：%s",
+            "开始第 %s 批，本批网站数量：%s，游标：%s",
             batch_number,
-            len(websites)
+            len(websites),
+            last_domain
         )
 
         result = process_batch(websites, totals)
+        after_domain = last_domain
 
         logger.info("------------------------------------")
         logger.info(
@@ -426,30 +501,25 @@ def main():
             totals["failed"]
         )
 
-        # 防止整批都处理失败，造成无限循环
-        if result["checked"] == 0:
-            logger.error(
-                "本批没有成功保存任何筛选结果，停止运行，避免无限循环"
-            )
+        if result["write_failed"]:
+            logger.error("D1 批量写入失败，停止本次运行")
             break
 
-    # ========================================================
-    # 最终统计
-    # ========================================================
+        if not last_domain:
+            logger.error("本批最后一条记录缺少 domain，停止运行")
+            break
 
     logger.info("")
     logger.info("====================================")
     logger.info("Deople 质量筛选完成")
     logger.info("====================================")
-
     logger.info("总检查数量：%s", totals["checked"])
     logger.info("合格网站：%s", totals["qualified"])
     logger.info("待复核网站：%s", totals["review"])
     logger.info("不合格网站：%s", totals["rejected"])
     logger.info("处理失败：%s", totals["failed"])
-
+    logger.info("是否达到本次运行上限：%s", reached_limit)
     logger.info("====================================")
-
 
 # ============================================================
 # 8. 程序入口
