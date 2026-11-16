@@ -1,19 +1,13 @@
 """
-Deople website metadata crawler.
-
-Reads websites with crawl_status='pending', fetches their HTML metadata,
-and writes results to the existing Cloudflare D1 websites table.
-
-Required environment variables:
-CF_ACCOUNT_ID, D1_DATABASE_ID, CF_API_TOKEN
+Deople homepage crawler.
+Collects metadata plus HTML-derived structure/content statistics.
+This is homepage-only analysis; it does not render JavaScript or crawl subpages.
 """
-
 import asyncio
 import ipaddress
 import os
 import socket
-import time
-from typing import Dict, Optional
+from typing import Dict
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -26,22 +20,16 @@ CONCURRENCY = int(os.getenv("CRAWL_CONCURRENCY", "10"))
 TIMEOUT = float(os.getenv("CRAWL_TIMEOUT", "15"))
 MAX_HTML_SIZE = int(os.getenv("CRAWL_MAX_HTML_SIZE", str(2 * 1024 * 1024)))
 MAX_REDIRECTS = 5
-
-USER_AGENT = (
-    "Mozilla/5.0 (compatible; DeopleBot/1.0; +https://deople.ai)"
-)
+USER_AGENT = "Mozilla/5.0 (compatible; DeopleBot/1.0; +https://deople.ai)"
 semaphore = asyncio.Semaphore(max(1, CONCURRENCY))
 
 
 def is_public_host(host: str) -> bool:
     """Reject private, loopback, link-local, reserved and non-public IPs."""
     try:
-        addresses = socket.getaddrinfo(
-            host, None, type=socket.SOCK_STREAM
-        )
+        addresses = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
         if not addresses:
             return False
-
         for entry in addresses:
             ip = ipaddress.ip_address(entry[4][0])
             if not ip.is_global:
@@ -51,34 +39,120 @@ def is_public_host(host: str) -> bool:
         return False
 
 
-def extract_metadata(html: str):
+def extract_page_data(html: str, page_url: str) -> Dict:
     soup = BeautifulSoup(html, "html.parser")
 
     title = soup.title.get_text(" ", strip=True) if soup.title else ""
-
     description = ""
     desc_tag = soup.find(
-        "meta", attrs={"name": lambda value: value and value.lower() == "description"}
+        "meta", attrs={"name": lambda v: v and v.lower() == "description"}
     )
     if desc_tag:
         description = (desc_tag.get("content") or "").strip()
-
     if not description:
-        og_desc = soup.find(
-            "meta",
-            attrs={"property": lambda value: value and value.lower() == "og:description"},
+        og = soup.find(
+            "meta", attrs={"property": lambda v: v and v.lower() == "og:description"}
         )
-        if og_desc:
-            description = (og_desc.get("content") or "").strip()
-
-    keywords = ""
+        if og:
+            description = (og.get("content") or "").strip()
     keywords_tag = soup.find(
-        "meta", attrs={"name": lambda value: value and value.lower() == "keywords"}
+        "meta", attrs={"name": lambda v: v and v.lower() == "keywords"}
     )
-    if keywords_tag:
-        keywords = (keywords_tag.get("content") or "").strip()
+    keywords = (keywords_tag.get("content") or "").strip() if keywords_tag else ""
 
-    return title[:500], description[:2000], keywords[:1000]
+    # Count structure/media from the original DOM.
+    headings = len(soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]))
+    paragraphs = len(soup.find_all("p"))
+    images = soup.find_all("img")
+    image_count = len(images)
+    image_alt_count = sum(1 for img in images if str(img.get("alt") or "").strip())
+    video_count = len(soup.find_all("video"))
+    for frame in soup.find_all("iframe"):
+        src = str(frame.get("src") or "").lower()
+        if any(host in src for host in (
+            "youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
+            "twitch.tv", "player.vimeo.com"
+        )):
+            video_count += 1
+
+    tables = len(soup.find_all("table"))
+    lists = len(soup.find_all(["ul", "ol"]))
+    forms = soup.find_all("form")
+    form_count = len(forms)
+
+    parsed_page = urlparse(page_url)
+    page_host = (parsed_page.hostname or "").lower()
+    internal_links = 0
+    external_links = 0
+    has_contact = False
+    has_about = False
+    has_search = bool(soup.find("input", attrs={"type": "search"}))
+
+    for link in soup.find_all("a", href=True):
+        href = str(link.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        absolute = urljoin(page_url, href)
+        parsed_link = urlparse(absolute)
+        if parsed_link.scheme not in ("http", "https"):
+            continue
+        link_host = (parsed_link.hostname or "").lower()
+        if link_host == page_host or link_host.endswith("." + page_host):
+            internal_links += 1
+            path_text = (parsed_link.path + " " + link.get_text(" ", strip=True)).lower()
+            if any(word in path_text for word in ("contact", "support", "联系我们", "联系")):
+                has_contact = True
+            if any(word in path_text for word in ("about", "关于我们", "关于")):
+                has_about = True
+            if "search" in path_text or "搜索" in path_text:
+                has_search = True
+        else:
+            external_links += 1
+
+    for form in forms:
+        form_text = (
+            str(form.get("action") or "") + " " +
+            form.get_text(" ", strip=True)
+        ).lower()
+        if "search" in form_text or "搜索" in form_text:
+            has_search = True
+        for field in form.find_all(["input", "button"]):
+            field_text = (
+                str(field.get("name") or "") + " " +
+                str(field.get("placeholder") or "") + " " +
+                str(field.get("aria-label") or "")
+            ).lower()
+            if str(field.get("type") or "").lower() == "search" or "search" in field_text or "搜索" in field_text:
+                has_search = True
+
+    # Prefer the main/article region for visible-text estimation.
+    content_root = soup.find("main") or soup.find("article") or soup.body or soup
+    content_soup = BeautifulSoup(str(content_root), "html.parser")
+    for node in content_soup(["script", "style", "noscript", "svg", "template",
+                              "nav", "footer", "form"]):
+        node.decompose()
+    visible_text = content_soup.get_text(" ", strip=True)
+    words = len(visible_text.split())
+
+    return {
+        "title": title[:500],
+        "description": description[:2000],
+        "keywords": keywords[:1000],
+        "word_count": words,
+        "heading_count": headings,
+        "paragraph_count": paragraphs,
+        "image_count": image_count,
+        "image_alt_count": image_alt_count,
+        "video_count": video_count,
+        "internal_link_count": internal_links,
+        "external_link_count": external_links,
+        "table_count": tables,
+        "list_count": lists,
+        "form_count": form_count,
+        "has_search": has_search,
+        "has_contact": has_contact,
+        "has_about": has_about,
+    }
 
 
 def normalize_start_url(row: Dict) -> str:
@@ -98,54 +172,42 @@ def normalize_start_url(row: Dict) -> str:
 async def fetch_website(client: httpx.AsyncClient, row: Dict) -> Dict:
     domain = str(row["domain"])
     result = {
-        "domain": domain,
-        "title": "",
-        "description": "",
-        "keywords": "",
-        "http_status": None,
-        "final_url": "",
-        "content_type": "",
+        "domain": domain, "title": "", "description": "", "keywords": "",
+        "http_status": None, "final_url": "", "content_type": "",
         "crawl_status": "failed",
     }
-
     async with semaphore:
         try:
             current_url = normalize_start_url(row)
-
             for _ in range(MAX_REDIRECTS + 1):
                 parsed = urlparse(current_url)
                 if parsed.scheme not in ("http", "https") or not parsed.hostname:
                     raise ValueError("Invalid redirect URL")
                 if parsed.port and parsed.port not in (80, 443):
                     raise ValueError("Redirect to non-standard port blocked")
-
-                safe = await asyncio.to_thread(is_public_host, parsed.hostname)
-                if not safe:
+                if not await asyncio.to_thread(is_public_host, parsed.hostname):
                     result["crawl_status"] = "blocked"
                     raise ValueError("Host resolves to a non-public IP")
 
                 async with client.stream(
-                    "GET",
-                    current_url,
+                    "GET", current_url,
                     headers={"User-Agent": USER_AGENT},
                     follow_redirects=False,
                 ) as response:
                     result["http_status"] = response.status_code
                     result["final_url"] = str(response.url)
                     result["content_type"] = (
-                        response.headers.get("content-type", "").split(";")[0].strip().lower()
+                        response.headers.get("content-type", "")
+                        .split(";")[0].strip().lower()
                     )
-
                     if response.status_code in (301, 302, 303, 307, 308):
                         location = response.headers.get("location")
                         if not location:
                             raise ValueError("Redirect response without Location")
                         current_url = urljoin(current_url, location)
                         continue
-
                     if not 200 <= response.status_code < 300:
                         raise ValueError(f"HTTP status {response.status_code}")
-
                     if "text/html" not in result["content_type"]:
                         raise ValueError("Response is not HTML")
 
@@ -157,64 +219,39 @@ async def fetch_website(client: httpx.AsyncClient, row: Dict) -> Dict:
                         body.extend(chunk[:remaining])
                         if len(body) >= MAX_HTML_SIZE:
                             break
-
                     if not body:
                         raise ValueError("Empty HTML response")
-
-                    encoding = response.encoding or "utf-8"
-                    html = bytes(body).decode(encoding, errors="replace")
-                    title, description, keywords = extract_metadata(html)
-
-                    result.update({
-                        "title": title,
-                        "description": description,
-                        "keywords": keywords,
-                        "crawl_status": "success",
-                    })
+                    html = bytes(body).decode(response.encoding or "utf-8", errors="replace")
+                    page_data = extract_page_data(html, result["final_url"] or current_url)
+                    result.update(page_data)
+                    result["crawl_status"] = "success"
                     return result
-
             raise ValueError("Too many redirects")
-
         except httpx.TimeoutException:
-            result["crawl_status"] = "failed"
             print(f"[TIMEOUT] {domain}")
         except (httpx.ConnectError, httpx.NetworkError) as exc:
-            result["crawl_status"] = "failed"
             print(f"[NETWORK ERROR] {domain}: {str(exc)[:180]}")
         except Exception as exc:
             print(f"[CRAWL ERROR] {domain}: {str(exc)[:180]}")
-
         return result
 
 
 async def main():
-    total = 0
-    succeeded = 0
-    failed = 0
-
+    total = succeeded = failed = 0
     limits = httpx.Limits(
         max_connections=max(1, CONCURRENCY),
         max_keepalive_connections=max(1, CONCURRENCY),
     )
-    timeout = httpx.Timeout(TIMEOUT)
-
     async with httpx.AsyncClient(
-        timeout=timeout,
-        limits=limits,
-        follow_redirects=False,
-        trust_env=False,
+        timeout=httpx.Timeout(TIMEOUT), limits=limits,
+        follow_redirects=False, trust_env=False,
     ) as client:
         while True:
             rows = get_pending_crawl_websites(READ_LIMIT)
             if not rows:
                 break
-
-            results = await asyncio.gather(
-                *(fetch_website(client, row) for row in rows)
-            )
-
+            results = await asyncio.gather(*(fetch_website(client, row) for row in rows))
             for item in results:
-                # Save each record separately so one bad row does not discard a batch.
                 try:
                     save_crawl_result(item)
                     total += 1
@@ -224,22 +261,15 @@ async def main():
                         failed += 1
                 except Exception as exc:
                     failed += 1
-                    print(
-                        f"[D1 WRITE ERROR] {item['domain']}: "
-                        f"{str(exc)[:250]}"
-                    )
-
+                    print(f"[D1 WRITE ERROR] {item['domain']}: {str(exc)[:250]}")
             print(
                 f"[BATCH] processed={len(results)} "
                 f"success={sum(x['crawl_status'] == 'success' for x in results)} "
                 f"failed={sum(x['crawl_status'] != 'success' for x in results)}"
             )
-
     print("=" * 45)
     print("Crawler finished")
-    print("Saved:", total)
-    print("Success:", succeeded)
-    print("Failed:", failed)
+    print("Saved:", total, "Success:", succeeded, "Failed:", failed)
 
 
 if __name__ == "__main__":
