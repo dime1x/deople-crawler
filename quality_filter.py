@@ -14,7 +14,7 @@ BATCH_SIZE = max(1, int(os.getenv("QUALITY_BATCH_SIZE", "100")))
 # 每条批量 UPDATE 最多处理 15 个网站，避免 SQL 绑定参数过多。
 BULK_UPDATE_SIZE = max(1, min(int(os.getenv("QUALITY_BULK_UPDATE_SIZE", "15")), 15))
 # 每次运行最多筛选 2000 个网站；设置为 0 表示不限制。
-MAX_PER_RUN = max(0, int(os.getenv("QUALITY_MAX_PER_RUN", "20000")))
+MAX_PER_RUN = max(0, int(os.getenv("QUALITY_MAX_PER_RUN", "2000")))
 
 # 最低合格分数
 QUALIFIED_SCORE = 65
@@ -50,7 +50,7 @@ def get_pending_quality_websites(limit=100, after_domain=""):
             http_status,
             content_type,
             crawl_status
-        FROM websites
+        FROM websites INDEXED BY idx_websites_quality_ready
         WHERE quality_status IS NULL
           AND crawl_status IS NOT NULL
           AND crawl_status != 'pending'
