@@ -4,7 +4,7 @@ name: Deople Crawler
 "on":
   workflow_dispatch: {}
   schedule:
-    - cron: "*/60 * * * *"
+    - cron: "17 * * * *"
 
 permissions:
   contents: read
