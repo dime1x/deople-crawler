@@ -48,4 +48,4 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
 
           # 每批检查100个，程序自动循环处理全部待筛选网站
-          QUALITY_BATCH_SIZE: "100"
+          QUALITY_BATCH_SIZE: "500"
