@@ -4,7 +4,7 @@ name: Deople Quality Filter
 on:
   schedule:
     # 每天 UTC 02:00 运行（北京时间 10:00）
-    - cron: "0 */2 * * *"
+    - cron: "*/60 * * * *"
 
   # 支持手动运行
   workflow_dispatch:
