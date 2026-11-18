@@ -15,8 +15,8 @@ from bs4 import BeautifulSoup
 
 from database import get_pending_crawl_websites, save_crawl_result
 
-READ_LIMIT = int(os.getenv("CRAWL_READ_LIMIT", "100"))
-CONCURRENCY = int(os.getenv("CRAWL_CONCURRENCY", "10"))
+READ_LIMIT = max(1, min(int(os.getenv("CRAWL_READ_LIMIT", "100")), 500))
+CONCURRENCY = max(1, min(int(os.getenv("CRAWL_CONCURRENCY", "10")), 50))
 TIMEOUT = float(os.getenv("CRAWL_TIMEOUT", "15"))
 MAX_HTML_SIZE = int(os.getenv("CRAWL_MAX_HTML_SIZE", str(2 * 1024 * 1024)))
 MAX_REDIRECTS = 5
@@ -238,6 +238,7 @@ async def fetch_website(client: httpx.AsyncClient, row: Dict) -> Dict:
 
 async def main():
     total = succeeded = failed = 0
+    d1_write_error = False
     limits = httpx.Limits(
         max_connections=max(1, CONCURRENCY),
         max_keepalive_connections=max(1, CONCURRENCY),
@@ -247,29 +248,56 @@ async def main():
         follow_redirects=False, trust_env=False,
     ) as client:
         while True:
+            # This query is designed to use idx_websites_crawl_pending.
             rows = get_pending_crawl_websites(READ_LIMIT)
             if not rows:
+                print("[DONE] No pending crawl websites found.")
                 break
+
             results = await asyncio.gather(*(fetch_website(client, row) for row in rows))
+            batch_saved = 0
+            batch_success = 0
+            batch_failed = 0
+
             for item in results:
                 try:
                     save_crawl_result(item)
                     total += 1
+                    batch_saved += 1
                     if item["crawl_status"] == "success":
                         succeeded += 1
+                        batch_success += 1
                     else:
                         failed += 1
+                        batch_failed += 1
                 except Exception as exc:
                     failed += 1
+                    d1_write_error = True
                     print(f"[D1 WRITE ERROR] {item['domain']}: {str(exc)[:250]}")
+                    # Do not query the same pending rows repeatedly after a D1
+                    # write failure. Unwritten rows remain pending for the next run.
+                    break
+
             print(
-                f"[BATCH] processed={len(results)} "
-                f"success={sum(x['crawl_status'] == 'success' for x in results)} "
-                f"failed={sum(x['crawl_status'] != 'success' for x in results)}"
+                f"[BATCH] fetched={len(rows)} saved={batch_saved} "
+                f"success={batch_success} failed={batch_failed}"
             )
+
+            if d1_write_error:
+                print("[STOP] D1 write failed; stopping to avoid rereading pending rows.")
+                break
+
+            # Safety guard: if no row was saved, another SELECT would return
+            # the same pending batch and could consume the read quota repeatedly.
+            if batch_saved == 0:
+                print("[STOP] No rows were saved; stopping to prevent a repeated query loop.")
+                break
+
     print("=" * 45)
     print("Crawler finished")
     print("Saved:", total, "Success:", succeeded, "Failed:", failed)
+    if d1_write_error:
+        print("Result: incomplete; retry remaining pending websites in the next run.")
 
 
 if __name__ == "__main__":
