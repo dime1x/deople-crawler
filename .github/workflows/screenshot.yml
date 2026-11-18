@@ -3,7 +3,7 @@ name: Deople Screenshot
 on:
   # 保留原来的每日 UTC 03:00（北京时间 11:00）计划
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
