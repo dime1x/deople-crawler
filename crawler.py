@@ -16,6 +16,7 @@ from bs4 import BeautifulSoup
 from database import get_pending_crawl_websites, save_crawl_result
 
 READ_LIMIT = max(1, min(int(os.getenv("CRAWL_READ_LIMIT", "100")), 500))
+MAX_BATCHES = max(1, int(os.getenv("CRAWL_MAX_BATCHES", "5")))
 CONCURRENCY = max(1, min(int(os.getenv("CRAWL_CONCURRENCY", "10")), 50))
 TIMEOUT = float(os.getenv("CRAWL_TIMEOUT", "15"))
 MAX_HTML_SIZE = int(os.getenv("CRAWL_MAX_HTML_SIZE", str(2 * 1024 * 1024)))
@@ -247,7 +248,10 @@ async def main():
         timeout=httpx.Timeout(TIMEOUT), limits=limits,
         follow_redirects=False, trust_env=False,
     ) as client:
-        while True:
+        # Hard cap the number of database batches per workflow run.
+        # Defaults: 100 rows per batch x 5 batches = at most 500 websites.
+        for batch_number in range(1, MAX_BATCHES + 1):
+            print(f"[BATCH START] {batch_number}/{MAX_BATCHES}")
             # This query is designed to use idx_websites_crawl_pending.
             rows = get_pending_crawl_websites(READ_LIMIT)
             if not rows:
@@ -292,6 +296,8 @@ async def main():
             if batch_saved == 0:
                 print("[STOP] No rows were saved; stopping to prevent a repeated query loop.")
                 break
+        else:
+            print(f"[LIMIT] Reached CRAWL_MAX_BATCHES={MAX_BATCHES}; remaining websites will wait for the next run.")
 
     print("=" * 45)
     print("Crawler finished")
