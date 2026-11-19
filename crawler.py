@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 from database import get_pending_crawl_websites, save_crawl_result
 
 READ_LIMIT = max(1, min(int(os.getenv("CRAWL_READ_LIMIT", "100")), 500))
-MAX_BATCHES = max(1, int(os.getenv("CRAWL_MAX_BATCHES", "5")))
+MAX_BATCHES = max(1, int(os.getenv("CRAWL_MAX_BATCHES", "50")))
 CONCURRENCY = max(1, min(int(os.getenv("CRAWL_CONCURRENCY", "10")), 50))
 TIMEOUT = float(os.getenv("CRAWL_TIMEOUT", "15"))
 MAX_HTML_SIZE = int(os.getenv("CRAWL_MAX_HTML_SIZE", str(2 * 1024 * 1024)))
