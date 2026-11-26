@@ -34,7 +34,7 @@ jobs:
 
       # 每批最多100条；最多5批，单次最多领取500条
       SCREENSHOT_BATCH_SIZE: "100"
-      SCREENSHOT_MAX_BATCHES: "5"
+      SCREENSHOT_MAX_BATCHES: "50"
       SCREENSHOT_WORKERS: "5"
 
       PYTHONUNBUFFERED: "1"
